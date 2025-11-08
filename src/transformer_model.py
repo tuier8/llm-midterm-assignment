@@ -8,6 +8,7 @@ import torch.nn as nn
 from transformer_components import (
     PositionalEncoding, 
     EncoderLayer,
+    DecoderLayer,
     MultiHeadSelfAttention,
     PositionwiseFeedForward
 )
@@ -217,5 +218,125 @@ class TransformerLM_NoResidual(nn.Module):
             x = self.norm_layers2[i](self.ffn_layers[i](x))
         
         output = self.fc_out(x)
+        return output
+
+
+class TransformerDecoder(nn.Module):
+    """
+    Transformer解码器
+    包含多个解码器层的堆叠
+    """
+    def __init__(self, vocab_size, d_model, num_heads, d_ff, num_layers, dropout=0.1, max_len=5000):
+        super(TransformerDecoder, self).__init__()
+        
+        self.d_model = d_model
+        
+        # 词嵌入层
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        
+        # 位置编码
+        self.positional_encoding = PositionalEncoding(d_model, max_len)
+        
+        # 解码器层堆叠
+        self.decoder_layers = nn.ModuleList([
+            DecoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x, enc_output, src_mask=None, tgt_mask=None):
+        """
+        Args:
+            x: (batch_size, tgt_seq_len) - 目标token索引
+            enc_output: (batch_size, src_seq_len, d_model) - 编码器输出
+            src_mask: (batch_size, 1, 1, src_seq_len) or None
+            tgt_mask: (batch_size, 1, tgt_seq_len, tgt_seq_len) or None
+        Returns:
+            output: (batch_size, tgt_seq_len, d_model)
+        """
+        # 词嵌入 + 缩放
+        x = self.embedding(x) * (self.d_model ** 0.5)
+        
+        # 添加位置编码
+        x = self.positional_encoding(x)
+        x = self.dropout(x)
+        
+        # 通过解码器层
+        for decoder_layer in self.decoder_layers:
+            x = decoder_layer(x, enc_output, src_mask, tgt_mask)
+        
+        return x
+
+
+class TransformerSeq2Seq(nn.Module):
+    """
+    完整的Transformer Seq2Seq模型
+    用于机器翻译等序列到序列任务
+    """
+    def __init__(self, src_vocab_size, tgt_vocab_size, d_model=256, num_heads=8, 
+                 d_ff=1024, num_layers=4, dropout=0.1, max_len=512):
+        super(TransformerSeq2Seq, self).__init__()
+        
+        self.d_model = d_model
+        
+        # 编码器
+        self.encoder = TransformerEncoder(
+            src_vocab_size, d_model, num_heads, d_ff, num_layers, dropout, max_len
+        )
+        
+        # 解码器
+        self.decoder = TransformerDecoder(
+            tgt_vocab_size, d_model, num_heads, d_ff, num_layers, dropout, max_len
+        )
+        
+        # 输出层: 将解码器隐藏状态映射到目标词汇表
+        self.fc_out = nn.Linear(d_model, tgt_vocab_size)
+        
+    def forward(self, src, tgt, src_mask=None, tgt_mask=None):
+        """
+        Args:
+            src: (batch_size, src_seq_len)
+            tgt: (batch_size, tgt_seq_len)
+            src_mask: (batch_size, 1, 1, src_seq_len) or None
+            tgt_mask: (batch_size, 1, tgt_seq_len, tgt_seq_len) or None
+        Returns:
+            output: (batch_size, tgt_seq_len, tgt_vocab_size)
+        """
+        # 编码源序列
+        enc_output = self.encoder(src, src_mask)
+        
+        # 解码目标序列
+        dec_output = self.decoder(tgt, enc_output, src_mask, tgt_mask)
+        
+        # 预测目标词汇
+        output = self.fc_out(dec_output)
+        
+        return output
+    
+    def encode(self, src, src_mask=None):
+        """
+        仅编码（用于推理）
+        Args:
+            src: (batch_size, src_seq_len)
+            src_mask: (batch_size, 1, 1, src_seq_len) or None
+        Returns:
+            enc_output: (batch_size, src_seq_len, d_model)
+        """
+        return self.encoder(src, src_mask)
+    
+    def decode(self, tgt, enc_output, src_mask=None, tgt_mask=None):
+        """
+        仅解码（用于推理）
+        Args:
+            tgt: (batch_size, tgt_seq_len)
+            enc_output: (batch_size, src_seq_len, d_model)
+            src_mask: (batch_size, 1, 1, src_seq_len) or None
+            tgt_mask: (batch_size, 1, tgt_seq_len, tgt_seq_len) or None
+        Returns:
+            output: (batch_size, tgt_seq_len, tgt_vocab_size)
+        """
+        dec_output = self.decoder(tgt, enc_output, src_mask, tgt_mask)
+        output = self.fc_out(dec_output)
         return output
 

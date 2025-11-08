@@ -119,6 +119,87 @@ class MultiHeadSelfAttention(nn.Module):
         return output
 
 
+class MultiHeadCrossAttention(nn.Module):
+    """
+    多头交叉注意力机制
+    用于解码器中，Q来自目标序列，K和V来自源序列（编码器输出）
+    """
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super(MultiHeadCrossAttention, self).__init__()
+        assert d_model % num_heads == 0, "d_model必须能被num_heads整除"
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        # Q, K, V的线性变换
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        
+        # 输出线性变换
+        self.W_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def scaled_dot_product_attention(self, Q, K, V, mask=None):
+        """
+        缩放点积注意力
+        Args:
+            Q: (batch_size, num_heads, tgt_seq_len, d_k)
+            K: (batch_size, num_heads, src_seq_len, d_k)
+            V: (batch_size, num_heads, src_seq_len, d_k)
+            mask: (batch_size, 1, 1, src_seq_len) or None
+        Returns:
+            output: (batch_size, num_heads, tgt_seq_len, d_k)
+            attention_weights: (batch_size, num_heads, tgt_seq_len, src_seq_len)
+        """
+        # 计算注意力分数
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        # 应用mask（如果有）
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+        
+        # 应用softmax
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        # 计算输出
+        output = torch.matmul(attention_weights, V)
+        
+        return output, attention_weights
+    
+    def forward(self, query, key_value, mask=None):
+        """
+        Args:
+            query: (batch_size, tgt_seq_len, d_model) - 来自解码器
+            key_value: (batch_size, src_seq_len, d_model) - 来自编码器
+            mask: (batch_size, 1, 1, src_seq_len) or None
+        Returns:
+            output: (batch_size, tgt_seq_len, d_model)
+        """
+        batch_size = query.size(0)
+        tgt_seq_len = query.size(1)
+        src_seq_len = key_value.size(1)
+        
+        # 线性变换并分割成多头
+        Q = self.W_q(query).view(batch_size, tgt_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_k(key_value).view(batch_size, src_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_v(key_value).view(batch_size, src_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # 应用缩放点积注意力
+        attn_output, self.attention_weights = self.scaled_dot_product_attention(Q, K, V, mask)
+        
+        # 合并多头
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, tgt_seq_len, self.d_model)
+        
+        # 最终线性变换
+        output = self.W_o(attn_output)
+        
+        return output
+
+
 class PositionwiseFeedForward(nn.Module):
     """
     位置前馈网络
@@ -184,7 +265,7 @@ class DecoderLayer(nn.Module):
     """
     Transformer解码器层
     包含: Masked Multi-Head Attention + Add&Norm + 
-          Multi-Head Attention + Add&Norm + FFN + Add&Norm
+          Multi-Head Cross-Attention + Add&Norm + FFN + Add&Norm
     """
     def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super(DecoderLayer, self).__init__()
@@ -193,7 +274,7 @@ class DecoderLayer(nn.Module):
         self.masked_self_attention = MultiHeadSelfAttention(d_model, num_heads, dropout)
         
         # Multi-Head Cross-Attention
-        self.cross_attention = MultiHeadSelfAttention(d_model, num_heads, dropout)
+        self.cross_attention = MultiHeadCrossAttention(d_model, num_heads, dropout)
         
         # Position-wise Feed-Forward
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff, dropout)
@@ -221,9 +302,8 @@ class DecoderLayer(nn.Module):
         x = self.norm1(x + self.dropout(attn_output))
         
         # Multi-Head Cross-Attention + 残差连接 + LayerNorm
-        # 注意: 这里需要修改cross_attention以支持不同的Q和K,V
-        # 简化起见，我们这里先用self-attention的实现
-        cross_attn_output = self.cross_attention(x, src_mask)
+        # Q来自解码器，K和V来自编码器输出
+        cross_attn_output = self.cross_attention(x, enc_output, src_mask)
         x = self.norm2(x + self.dropout(cross_attn_output))
         
         # Feed-Forward + 残差连接 + LayerNorm
