@@ -1,0 +1,7 @@
+{
+  "final_train_loss": 4.5022024026694005,
+  "final_val_loss": 4.969341312135969,
+  "final_bleu_score": 23.02259934195632,
+  "best_bleu_score": 79.37716255353804,
+  "best_val_loss": 4.969341312135969
+}
